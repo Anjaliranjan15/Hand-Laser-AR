@@ -1,0 +1,356 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Hand Laser AR</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&display=swap');
+ 
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+ 
+  body {
+    background: #000;
+    color: #fff;
+    font-family: 'Space Mono', monospace;
+    overflow: hidden;
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+  }
+ 
+  #container {
+    position: relative;
+    width: 640px;
+    height: 480px;
+    border: 1px solid rgba(255,255,255,0.1);
+    border-radius: 4px;
+    overflow: hidden;
+    background: #0a0a0a;
+  }
+ 
+  #video {
+    position: absolute;
+    top: 0; left: 0;
+    width: 100%; height: 100%;
+    object-fit: cover;
+    transform: scaleX(-1);
+  }
+ 
+  #canvas {
+    position: absolute;
+    top: 0; left: 0;
+    width: 100%; height: 100%;
+    transform: scaleX(-1);
+  }
+ 
+  #hud {
+    position: absolute;
+    top: 12px; left: 12px;
+    background: rgba(0,0,0,0.6);
+    border: 1px solid rgba(255,255,255,0.12);
+    border-radius: 4px;
+    padding: 10px 14px;
+    font-size: 11px;
+    line-height: 1.9;
+    backdrop-filter: blur(6px);
+    min-width: 160px;
+    z-index: 10;
+  }
+ 
+  .hud-row { display: flex; justify-content: space-between; gap: 16px; }
+  .hud-label { color: rgba(255,255,255,0.45); }
+  .hud-val { color: #0ff; font-weight: 700; }
+  .hud-val.gesture { color: #f0f; }
+  .hud-val.spread { color: #ff0; }
+ 
+  #status {
+    position: absolute;
+    bottom: 0; left: 0; right: 0;
+    text-align: center;
+    padding: 10px;
+    font-size: 11px;
+    color: rgba(255,255,255,0.3);
+    background: rgba(0,0,0,0.5);
+    z-index: 10;
+  }
+ 
+  #start-btn {
+    position: absolute;
+    top: 50%; left: 50%;
+    transform: translate(-50%, -50%);
+    background: transparent;
+    border: 1px solid rgba(255,255,255,0.3);
+    color: #fff;
+    font-family: 'Space Mono', monospace;
+    font-size: 12px;
+    padding: 12px 24px;
+    cursor: pointer;
+    border-radius: 2px;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    transition: border-color 0.2s, color 0.2s;
+    z-index: 20;
+  }
+  #start-btn:hover { border-color: #0ff; color: #0ff; }
+ 
+  .title-bar {
+    width: 640px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 8px 0 8px;
+    font-size: 10px;
+    color: rgba(255,255,255,0.2);
+    letter-spacing: 3px;
+    text-transform: uppercase;
+  }
+ 
+  .dot { width: 6px; height: 6px; border-radius: 50%; background: rgba(255,255,255,0.15); }
+  .dots { display: flex; gap: 5px; }
+</style>
+</head>
+<body>
+ 
+<div class="title-bar">
+  <span>HAND LASER AR</span>
+  <div class="dots"><div class="dot"></div><div class="dot"></div><div class="dot"></div></div>
+</div>
+ 
+<div id="container">
+  <video id="video" autoplay playsinline muted></video>
+  <canvas id="canvas"></canvas>
+ 
+  <div id="hud">
+    <div class="hud-row"><span class="hud-label">Hands</span><span class="hud-val" id="hud-hands">0</span></div>
+    <div class="hud-row"><span class="hud-label">FPS</span><span class="hud-val" id="hud-fps">0</span></div>
+    <div class="hud-row"><span class="hud-label">Gesture</span><span class="hud-val gesture" id="hud-gesture">—</span></div>
+    <div class="hud-row"><span class="hud-label">Spread</span><span class="hud-val spread" id="hud-spread">—</span></div>
+  </div>
+ 
+  <div id="status">Allow camera access to start</div>
+  <button id="start-btn" onclick="startApp()">▶ START CAMERA</button>
+</div>
+ 
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
+ 
+<script>
+const video = document.getElementById('video');
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+canvas.width = 640;
+canvas.height = 480;
+ 
+const FINGERTIP_IDS = [4, 8, 12, 16, 20];
+const BEAM_COLORS = ['#ff2d78', '#ff8800', '#ffe600', '#00ff88', '#00cfff'];
+const KNUCKLE_CONNECTIONS = [
+  [0,1],[1,2],[2,3],[3,4],
+  [0,5],[5,6],[6,7],[7,8],
+  [9,10],[10,11],[11,12],
+  [13,14],[14,15],[15,16],
+  [0,17],[17,18],[18,19],[19,20],
+  [5,9],[9,13],[13,17]
+];
+ 
+let handsDetected = 0;
+let currentGesture = '—';
+let currentSpread = '—';
+let lastTime = performance.now();
+let fps = 0;
+let frameCount = 0;
+let sparkles = [];
+ 
+function addSparkle(x, y, color) {
+  if (Math.random() > 0.4) return;
+  sparkles.push({ x, y, color, life: 1, vx: (Math.random()-0.5)*4, vy: (Math.random()-0.5)*4, size: Math.random()*3+1 });
+}
+ 
+function updateSparkles() {
+  sparkles = sparkles.filter(s => s.life > 0);
+  sparkles.forEach(s => {
+    s.x += s.vx; s.y += s.vy;
+    s.life -= 0.06;
+    ctx.save();
+    ctx.globalAlpha = s.life;
+    ctx.fillStyle = s.color;
+    ctx.shadowColor = s.color;
+    ctx.shadowBlur = 6;
+    ctx.beginPath();
+    ctx.arc(s.x, s.y, s.size, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  });
+}
+ 
+function lm(hand, i) {
+  return { x: hand[i].x * canvas.width, y: hand[i].y * canvas.height };
+}
+ 
+function drawHandSkeleton(hand, color) {
+  ctx.save();
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 1;
+  ctx.shadowBlur = 8;
+  ctx.shadowColor = color;
+  ctx.globalAlpha = 0.6;
+  KNUCKLE_CONNECTIONS.forEach(([a, b]) => {
+    const p1 = lm(hand, a), p2 = lm(hand, b);
+    ctx.beginPath();
+    ctx.moveTo(p1.x, p1.y);
+    ctx.lineTo(p2.x, p2.y);
+    ctx.stroke();
+  });
+  // draw joints
+  hand.forEach((pt, i) => {
+    const x = pt.x * canvas.width, y = pt.y * canvas.height;
+    ctx.beginPath();
+    ctx.globalAlpha = FINGERTIP_IDS.includes(i) ? 0.9 : 0.5;
+    ctx.arc(x, y, FINGERTIP_IDS.includes(i) ? 4 : 2.5, 0, Math.PI * 2);
+    ctx.fillStyle = color;
+    ctx.shadowBlur = 12;
+    ctx.fill();
+  });
+  ctx.restore();
+}
+ 
+function drawLaserBeam(x1, y1, x2, y2, color, width) {
+  // glow core
+  ctx.save();
+  ctx.beginPath();
+  ctx.moveTo(x1, y1);
+  ctx.lineTo(x2, y2);
+  ctx.strokeStyle = '#fff';
+  ctx.lineWidth = width * 0.3;
+  ctx.globalAlpha = 0.6;
+  ctx.shadowBlur = 0;
+  ctx.stroke();
+ 
+  // colored glow
+  ctx.beginPath();
+  ctx.moveTo(x1, y1);
+  ctx.lineTo(x2, y2);
+  ctx.strokeStyle = color;
+  ctx.lineWidth = width;
+  ctx.globalAlpha = 0.85;
+  ctx.shadowBlur = 18;
+  ctx.shadowColor = color;
+  ctx.stroke();
+ 
+  // outer glow
+  ctx.beginPath();
+  ctx.moveTo(x1, y1);
+  ctx.lineTo(x2, y2);
+  ctx.strokeStyle = color;
+  ctx.lineWidth = width * 3;
+  ctx.globalAlpha = 0.15;
+  ctx.shadowBlur = 30;
+  ctx.shadowColor = color;
+  ctx.stroke();
+ 
+  ctx.restore();
+  addSparkle(x1, y1, color);
+  addSparkle(x2, y2, color);
+}
+ 
+function detectGesture(handA, handB) {
+  if (!handA || !handB) return { gesture: '—', spread: '—' };
+ 
+  // pinch: thumb tip to index tip distance
+  const thumbA = lm(handA, 4), indexA = lm(handA, 8);
+  const d = Math.hypot(thumbA.x - indexA.x, thumbA.y - indexA.y);
+  const pinching = d < 40;
+ 
+  // spread: average distance between same fingertips of both hands
+  let totalDist = 0;
+  FINGERTIP_IDS.forEach(id => {
+    const a = lm(handA, id), b = lm(handB, id);
+    totalDist += Math.hypot(a.x - b.x, a.y - b.y);
+  });
+  const avgDist = totalDist / FINGERTIP_IDS.length;
+  const spread = Math.min(100, Math.round(avgDist / 5));
+ 
+  return { gesture: pinching ? 'PINCH !' : 'OPEN', spread: spread + '%' };
+}
+ 
+function onResults(results) {
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+ 
+  // FPS
+  frameCount++;
+  const now = performance.now();
+  if (now - lastTime >= 500) {
+    fps = Math.round(frameCount * 1000 / (now - lastTime));
+    frameCount = 0;
+    lastTime = now;
+  }
+ 
+  const lms = results.multiHandLandmarks || [];
+  handsDetected = lms.length;
+ 
+  // skeleton for each hand
+  const skeletonColors = ['#ffd700', '#00cfff'];
+  lms.forEach((hand, i) => drawHandSkeleton(hand, skeletonColors[i % 2]));
+ 
+  // lasers between two hands
+  if (lms.length >= 2) {
+    const handA = lms[0], handB = lms[1];
+    FINGERTIP_IDS.forEach((tipId, i) => {
+      const a = lm(handA, tipId), b = lm(handB, tipId);
+      drawLaserBeam(a.x, a.y, b.x, b.y, BEAM_COLORS[i], 2.5);
+    });
+    const { gesture, spread } = detectGesture(handA, handB);
+    currentGesture = gesture;
+    currentSpread = spread;
+  } else {
+    currentGesture = '—';
+    currentSpread = '—';
+  }
+ 
+  updateSparkles();
+ 
+  // update HUD
+  document.getElementById('hud-hands').textContent = handsDetected;
+  document.getElementById('hud-fps').textContent = fps;
+  document.getElementById('hud-gesture').textContent = currentGesture;
+  document.getElementById('hud-spread').textContent = currentSpread;
+}
+ 
+async function startApp() {
+  document.getElementById('start-btn').style.display = 'none';
+  document.getElementById('status').textContent = 'Loading MediaPipe…';
+ 
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480, facingMode: 'user' } });
+    video.srcObject = stream;
+ 
+    const hands = new Hands({
+      locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${f}`
+    });
+    hands.setOptions({
+      maxNumHands: 2,
+      modelComplexity: 1,
+      minDetectionConfidence: 0.7,
+      minTrackingConfidence: 0.5
+    });
+    hands.onResults(onResults);
+ 
+    const camera = new Camera(video, {
+      onFrame: async () => { await hands.send({ image: video }); },
+      width: 640, height: 480
+    });
+    camera.start();
+    document.getElementById('status').textContent = 'Show both hands to see lasers';
+  } catch (e) {
+    document.getElementById('status').textContent = 'Camera error: ' + e.message;
+    document.getElementById('start-btn').style.display = 'block';
+    document.getElementById('start-btn').textContent = '⟳ RETRY';
+  }
+}
+</script>
+</body>
+</html>
+ 
